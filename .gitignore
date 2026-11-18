@@ -57,3 +57,25 @@ server.exe
 
 # Local build artifacts (local-45/build.sh 的产物，不进仓库)
 /local-45/dist/
+
+# ---- 本地部署产物（本机专用，绝不入库）----
+# 专用出口内核目录：config.yaml 含完整机场订阅（节点密码/SNI），.secret 是控制口密钥
+mihomo-core/
+mihomo-core/**
+# 内核/守护产生的日志与 pid
+core.log
+run.out.log
+run.err.log
+watchdog.log
+.watchdog.pid
+.login-state
+# 代理池与账号状态（若把网关跑在仓库目录里）
+proxy-pool.json
+proxy-pool.json.bak
+auths/**
+data/**
+# 订阅/代理订阅原始文件
+*.yaml.bak
+*.yaml.orig
+subscribe*.yaml
+sub*.yaml
