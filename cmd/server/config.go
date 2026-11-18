@@ -58,6 +58,21 @@ type Config struct {
 		Mirror string `json:"mirror"`
 	} `json:"update"`
 
+	// Login 控制 OAuth 登录（auth/state、auth/token、login/account）的出站通道。
+	//
+	// 为什么单独给一段：这三个请求原来是包级写死直连的，用的是本机公网 IP；而账号
+	// 登录后所有对话走代理池出口。两者 IP 不一致容易被上游判成异地登录（11140）。
+	// 把登录也指到账号固定出口那条线路上，登录与使用就同 IP 了。
+	Login struct {
+		// Proxy 登录走哪个出口（热生效）：空 = 不显式设置。支持
+		// http:// / https:// / socks5:// / socks5h://。
+		// 典型值：socks5h://127.0.0.1:10801（与账号固定出口同一个本地端口）。
+		Proxy string `json:"proxy"`
+		// ProxyFromEnv 是否沿用进程环境变量里的 HTTP(S)_PROXY（缺省 true，
+		// 保持历史行为）。显式 false 且 Proxy 为空 = 强制直连。
+		ProxyFromEnv *bool `json:"proxy_from_env"`
+	} `json:"login"`
+
 	Accounts struct {
 		// ReloadInterval 账号目录热重载轮询间隔（issue #199）。空 = 默认 10s；
 		// "0s" = 关闭轮询（手动接口 POST /panel/api/accounts/reload 仍然可用）。

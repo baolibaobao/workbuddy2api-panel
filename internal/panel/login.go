@@ -19,14 +19,92 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
 )
+
+// loginEgressURL / loginEgressFromEnv 控制 OAuth 登录请求的出站通道。
+//
+// 为什么需要这两个变量：loginHTTP 是包级 var，Transport 里原本没有 Proxy 字段，
+// 于是 auth/state、auth/token、login/account 三个请求恒为**直连**（用的是本机公网
+// IP）。而账号登录后所有对话走代理池出口 —— 登录 IP 与使用 IP 天然不同，容易被
+// 上游判成「异地/异常行为」（11140）。这里留一个可配置的出站口，让运维能把
+// 「登录」这一步也放到与账号固定出口同一条线路上。
+//
+// 语义与 update.proxy / update.proxy_from_env 保持一致：
+//   - login.proxy 非空 → 一律走它（http:// / https:// / socks5:// / socks5h://）
+//   - login.proxy 为空且 login.proxy_from_env=true（缺省）→ 沿用 HTTP(S)_PROXY 环境变量
+//   - login.proxy 为空且 login.proxy_from_env=false → 显式直连
+//
+// 都是热生效的：面板保存配置后立刻对后续登录请求起作用，不需要重启。
+var (
+	loginEgressURL     atomic.Value // string：已校验的代理 URL，空 = 未配置
+	loginEgressFromEnv atomic.Bool  // 是否沿用环境变量（缺省 true）
+)
+
+func init() {
+	loginEgressURL.Store("")
+	loginEgressFromEnv.Store(true)
+}
+
+// SetLoginEgress 配置登录请求的出站代理。proxy 为空时按 fromEnv 决定是否沿用环境变量。
+// 返回 error 表示 proxy 写法不合法（调用方只记日志，不要因此拒绝启动）。
+func SetLoginEgress(proxy string, fromEnv bool) error {
+	proxy = strings.TrimSpace(proxy)
+	if proxy != "" {
+		u, err := url.Parse(proxy)
+		if err != nil {
+			return fmt.Errorf("login 代理地址无法解析: %w", err)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("login 代理只支持 http/https/socks5/socks5h，收到 %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("login 代理缺少主机: %q", proxy)
+		}
+		// socks5h 对 http.Transport 就是 socks5（域名交给代理解析），统一归一。
+		if strings.EqualFold(u.Scheme, "socks5h") {
+			u.Scheme = "socks5"
+		}
+		loginEgressURL.Store(u.String())
+	} else {
+		loginEgressURL.Store("")
+	}
+	loginEgressFromEnv.Store(fromEnv)
+	return nil
+}
+
+// LoginEgress 返回当前生效的登录出站描述（面板可展示）："socks5://127.0.0.1:10801"
+// / "env"（沿用环境变量）/ "direct"。
+func LoginEgress() string {
+	if raw, _ := loginEgressURL.Load().(string); raw != "" {
+		return raw
+	}
+	if loginEgressFromEnv.Load() {
+		return "env"
+	}
+	return "direct"
+}
+
+// loginProxyFunc 按上述三层语义给出每次请求的代理。
+func loginProxyFunc(r *http.Request) (*url.URL, error) {
+	if raw, _ := loginEgressURL.Load().(string); raw != "" {
+		return url.Parse(raw)
+	}
+	if !loginEgressFromEnv.Load() {
+		return nil, nil
+	}
+	return http.ProxyFromEnvironment(r)
+}
 
 const (
 	// clientUA 保留仅为兼容既有测试引用；设备码端点实际 UA 按站点取
@@ -115,6 +193,9 @@ func (e *loginEnvelopeError) Error() string {
 var loginHTTP = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: &http.Transport{
+		// Proxy：让登录请求也能走指定出口（login.proxy / HTTP(S)_PROXY）。
+		// 留空时与历史行为一致（ProxyFromEnvironment，通常无环境变量 = 直连）。
+		Proxy: loginProxyFunc,
 		DialContext: (&net.Dialer{
 			Timeout:   8 * time.Second,
 			KeepAlive: 15 * time.Second,

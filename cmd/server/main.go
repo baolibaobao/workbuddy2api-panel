@@ -462,6 +462,8 @@ func main() {
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
 	updateManager := updater.New(appVersion, appRepository, *cfgPath, updateSettingsFrom(cfg))
+	// 登录出站（login.proxy）：让 OAuth 三个请求与账号固定出口同 IP，避免异地登录风控。
+	applyLoginEgress(cfg)
 	var pn *panel.Panel
 	pn = panel.New(panel.Config{
 		Pool:       p,
@@ -500,6 +502,7 @@ func main() {
 			}
 			if saved, loadErr := Load(*cfgPath); loadErr == nil {
 				updateManager.Configure(updateSettingsFrom(saved))
+				applyLoginEgress(saved)
 			} else if loadErr != nil {
 				log.Printf("WARN: reload update settings: %v", loadErr)
 			}
@@ -893,6 +896,27 @@ func updateSettingsFrom(u *Config) updater.Settings {
 		ProxyFromEnv: fromEnv,
 		Mirror:       u.Update.Mirror,
 	}
+}
+
+// applyLoginEgress 把 config 的 login 段应用到面板的登录出站通道。
+//
+// 为什么单独一个函数：登录（auth/state、auth/token、login/account）原来是包级写死
+// 直连的，出口是本机公网 IP；而账号登录后对话走代理池 —— 两者 IP 不一致容易被上游
+// 判成异地登录（11140）。这里让登录也能指定出口，与 update.proxy 同一套语义。
+//
+// proxy_from_env 是 *bool：JSON 缺键 = 未表态 → 沿用环境变量（历史行为）；显式
+// false 且 proxy 为空 = 强制直连。地址写错只记日志、不阻断启动，否则一个手误就把
+// 整个网关挡在门外。
+func applyLoginEgress(c *Config) {
+	fromEnv := true
+	if c.Login.ProxyFromEnv != nil {
+		fromEnv = *c.Login.ProxyFromEnv
+	}
+	if err := panel.SetLoginEgress(c.Login.Proxy, fromEnv); err != nil {
+		log.Printf("WARN: login 出站代理配置无效，按环境变量处理: %v", err)
+		return
+	}
+	log.Printf("[login] OAuth 出站通道: %s", panel.LoginEgress())
 }
 
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel, running ...*Config) ([]string, error) {
